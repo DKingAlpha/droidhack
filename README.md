@@ -45,19 +45,19 @@ for m in qq.maps:
 
 Interactive searching
 ```python
-candidates = []
+candidates = qq.search(int(input('current value:')), limit=0, verbose=True)
 while True:
-    current_value = int(input('current value:'))
-    # set addr_start and addr_end to narrow the search range
-    candidates = qq.search(pattern=current_value, limit=0, verbose=True)
+    cand = []
+    for c in candidates:
+        if qq.search(pattern=int(input('current value:')), addr_start=c, addr_end=c+4):
+            cand.append(c)
+    candidates = cand
     print(f'found {len(candidates)} results.')
     if len(candidates) < 10:
         break
 
 # play with found candidates
-print(candidates)
 pass
-
 ```
 
 
@@ -89,3 +89,5 @@ or you might just fuck up your phone.
 If you have trouble connecting by remote ip address of android phone,
 `adb forward tcp:8022 tcp:8022` will forward 8022 port from remote to your local address.
 So you can connected to `127.0.0.1:8022` instead.
+
+PyCharms 2020.1 has a bug in `.pycharm_helper`, remember to fix the bug manually.

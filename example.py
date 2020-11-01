@@ -23,9 +23,13 @@ kmem = DevKmem()
 sys_open_addr = kmem.get_sym('sys_open')[0]['addr']
 print(f'{sys_open_addr:x}')
 
-candidates = []
+candidates = qq.search(int(input('current value:')), limit=0, verbose=True)
 while True:
-    candidates = qq.search(pattern=1234, limit=0, verbose=True)
+    cand = []
+    for c in candidates:
+        if qq.search(pattern=int(input('current value:')), addr_start=c, addr_end=c+4):
+            cand.append(c)
+    candidates = cand
     print(f'found {len(candidates)} results.')
     if len(candidates) < 10:
         break

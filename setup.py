@@ -18,5 +18,5 @@ setuptools.setup(
         "License :: OSI Approved :: GNU Lesser General Public License, version 3",
         "Operating System :: POSIX",
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.7',
 )

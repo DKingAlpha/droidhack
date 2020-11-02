@@ -2,7 +2,6 @@ from ._utils import *
 from ctypes import *
 from .procfs import Process, Flags
 
-
 '''
     you are lucky if your system ship with /dev/mem and /dev/kmem
 '''
@@ -62,7 +61,7 @@ class DevKmem(MemoryFile):
     def ksym_off():
         Flags.set('kernel/kptr_restrict', 2)
 
-    @cached_kernel_property
+    @cached_property
     def ksym(self):
         fp = '/proc/kallsyms'
         if not os.path.exists(fp):

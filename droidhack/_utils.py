@@ -3,6 +3,26 @@ import os
 from typing import Iterable
 import logging
 
+logger = logging.getLogger('DroidHack')
+logger.setLevel(logging.INFO)
+_ch = logging.StreamHandler()
+_ch.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
+logger.addHandler(_ch)
+
+
+def cached_property(fn):
+    @property
+    def wrapped_call(self):
+        # it's ok to not check validity if querying cache
+        if fn.__name__ in self.cache:
+            return self.cache[fn.__name__]
+        retval = fn(self)
+        self.cache[fn.__name__] = retval
+        return retval
+
+    return wrapped_call
+
+
 # wrapper for Process
 def cached_proc_property(fn):
     @property
@@ -16,24 +36,11 @@ def cached_proc_property(fn):
         procdir = f'/proc/{self.pid}'
         if not (os.path.exists(procdir) and os.path.isdir(procdir)):
             self.invalid = True
-            return ''
+            return None
         procfile = f'/proc/{self.pid}/{fn.__name__}'
         if not (os.path.exists(procfile) and os.path.isfile(procfile)):
             self.cache[fn.__name__] = None
             return None
-        retval = fn(self)
-        self.cache[fn.__name__] = retval
-        return retval
-
-    return wrapped_call
-
-
-def cached_kernel_property(fn):
-    @property
-    def wrapped_call(self):
-        # it's ok to not check validity if querying cache
-        if fn.__name__ in self.cache:
-            return self.cache[fn.__name__]
         retval = fn(self)
         self.cache[fn.__name__] = retval
         return retval
@@ -68,4 +75,3 @@ def pattern_search(buf: bytes, target: bytes, mask: Iterable, start: int = 0) ->
             if not mismatch:
                 return i
         return -1
-

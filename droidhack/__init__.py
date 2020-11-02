@@ -1,1 +1,3 @@
-__all__ = ['devfs', 'procfs']
+from ._utils import logger
+
+__all__ = ['devfs', 'procfs', 'logger']

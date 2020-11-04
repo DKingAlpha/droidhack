@@ -1,6 +1,5 @@
 # coding: utf-8
 import os
-from typing import Iterable
 import logging
 
 logger = logging.getLogger('DroidHack')
@@ -8,7 +7,6 @@ logger.setLevel(logging.INFO)
 _ch = logging.StreamHandler()
 _ch.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
 logger.addHandler(_ch)
-
 
 def cached_property(fn):
     @property
@@ -60,7 +58,7 @@ def noexcept(fn, fail_ret=0):
     return wrapped_call
 
 
-def pattern_search(buf: bytes, target: bytes, mask: Iterable, start: int = 0) -> int:
+def pattern_search(buf: bytes, target: bytes, mask: tuple, start: int = 0) -> int:
     if not mask:
         return buf.find(target, start)
     else:

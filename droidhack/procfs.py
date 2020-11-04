@@ -1,14 +1,12 @@
-from __future__ import annotations
-
 import re
 import struct
 from ctypes import *
 from typing import Union as TUnion, Callable
-from pathlib import Path
+import pathlib
 
 from ._utils import *
 
-__all__ = ['Processes', 'Process', 'Memory', 'Flags', 'MapInfo']
+__all__ = ['Processes', 'Process', 'Memory', 'Flags', 'MapInfo', 'SMapInfo']
 
 
 class Processes:
@@ -77,6 +75,38 @@ class MapInfo(dict):
         return f"addr: {self.addr:x}, size: {self.size:x}, offset: {self.offset:08x} {self.perm} {self.path}"
 
 
+class SMapInfo(dict):
+    """
+    members (case-insensitive):
+        addr, size, perm, path, offset, dev, inode
+        name, kernelpagesize, mmupagesize, rss, pss,
+        referenced, anonymous, anonHugePages
+        vmflags ...
+
+    usage:
+        m.addr or m['addr']
+    """
+    def __init__(self):
+        super().__init__()
+        __setattr__ = self.__setitem__
+        __delattr__ = self.__delitem__
+
+    def __setitem__(self, key, value):
+        assert isinstance(key, str)
+        return super().__setitem__(key.lower(), value)
+
+    def __delitem__(self, key):
+        assert isinstance(key, str)
+        return super().__setitem__(key.lower())
+
+    def __getattr__(self, item):
+        return super().get(item.lower())
+
+
+    def __repr__(self):
+        return f"addr: {self.addr:x}, size: {self.size:x}, offset: {self.offset:08x} {self.perm} {self.path}"
+
+
 class Process:
     def __init__(self, pid):
         self.pid = pid
@@ -88,15 +118,21 @@ class Process:
         self.invalid = False
 
     def __repr__(self):
-        return f'[{self.pid}]{"".join(self.cmdline)}'
+        return f'[{self.pid}] {"".join(self.cmdline)}'
 
-    def update(self):
-        self.cache = {}
+    def update(self, prop=''):
+        """
+        :param prop: leave blank to clean all caches
+        """
+        if prop:
+            self.cache.pop(prop, None)
+        else:
+            self.cache = {}
 
     @cached_property
     def x64(self) -> bool:
         tmp = open(f'/proc/{self.pid}/maps', 'r')
-        addrs = tmp.readline().rstrip().split()[self.maps_config['index']['addr']].split('-')
+        addrs = tmp.readlines()[-1].rstrip().split()[self.maps_config['index']['addr']].split('-')
         tmp.close()
         return len(addrs[0]) > 8
 
@@ -113,44 +149,83 @@ class Process:
 
     @cached_proc_property
     def cmdline(self) -> tuple:
-        cmdline_content = Path(f'/proc/{self.pid}/cmdline').read_text()
+        cmdline_content = pathlib.Path(f'/proc/{self.pid}/cmdline').read_text()
         if not cmdline_content:
             return ()
         cmdlines = cmdline_content.split('\x00')
         return tuple([c for c in cmdlines if c != ''])
 
     @cached_proc_property
+    def smaps(self) -> list:
+        def handle_block(block):
+            sinfo = SMapInfo()
+            mapinfo = self._maps_line_to_mapinfo(block.pop(0))
+            for k in mapinfo:
+                sinfo[k] = mapinfo[k]
+            for i in block:
+                data = i.split(':', 1)
+                k = data[0].lower()
+                if k == 'name':
+                    v = data[1].lstrip()
+                elif k == 'vmflags':
+                    v = data[1].strip().split()
+                else:
+                    v_size = data[1].lstrip().split()
+                    assert v_size[1] == 'kB'
+                    v = int(v_size[0]) * 1024
+                sinfo[k] = v
+            return sinfo
+
+        retval = []
+        current_block = []
+        smaps_content = pathlib.Path(f'/proc/{self.pid}/smaps').read_text()
+        if not smaps_content:
+            return []
+        start_pattern = re.compile(r'[0-9a-fA-F]+-[0-9a-fA-F]+\s[rwxsp-]*\s.*')
+        for m in smaps_content.splitlines():
+            m = m.rstrip()
+            if start_pattern.fullmatch(m):
+                if current_block:
+                    retval.append(handle_block(current_block))
+                    current_block = []
+            current_block.append(m)
+        return retval
+
+    def _maps_line_to_mapinfo(self, line):
+        minfo = line.rstrip().split(maxsplit=self.maps_config['maxsplit'])
+        mm = MapInfo()
+        for col in self.maps_config['index']:
+            col_index = self.maps_config['index'][col]
+            if col_index < len(minfo):
+                mm[col] = minfo[col_index]
+            else:
+                mm[col] = ''
+        # parse addr
+        maddr = str(mm.addr).split('-')
+        if len(maddr) == 2:
+            mm.addr = int(maddr[0], 16)
+            mm.size = int(maddr[1], 16) - int(maddr[0], 16)
+        # parse offset
+        offset = int(mm.offset, 16)
+        mm.offset = offset
+        # parse inode
+        inode = int(mm.inode, 10)
+        mm.inode = inode
+        return mm
+
+    @cached_proc_property
     def maps(self) -> list:
-        maps_content = Path(f'/proc/{self.pid}/maps').read_text()
+        maps_content = pathlib.Path(f'/proc/{self.pid}/maps').read_text()
         if not maps_content:
             return []
         retval = []
         for m in maps_content.splitlines():
-            minfo = m.rstrip().split(maxsplit=self.maps_config['maxsplit'])
-            mm = MapInfo()
-            for col in self.maps_config['index']:
-                col_index = self.maps_config['index'][col]
-                if col_index < len(minfo):
-                    mm[col] = minfo[col_index]
-                else:
-                    mm[col] = ''
-            # parse addr
-            maddr = str(mm.addr).split('-')
-            if len(maddr) == 2:
-                mm.addr = int(maddr[0], 16)
-                mm.size = int(maddr[1], 16) - int(maddr[0], 16)
-            # parse offset
-            offset = int(mm.offset, 16)
-            mm.offset = offset
-            # parse inode
-            inode = int(mm.inode, 10)
-            mm.inode = inode
-            retval.append(mm)
+            retval.append(self._maps_line_to_mapinfo(m))
 
         return retval
 
     @cached_proc_property
-    def mem(self) -> Memory:
+    def mem(self):
         return Memory(self.pid, self.x64)
 
     def search(self, pattern: str, addr: int = 0, size: int = 0, pattern_type: str = '', limit: int = 1,
@@ -180,32 +255,63 @@ class Process:
                     break
             return retval
 
-    def dump(self, file_path, output_path):
-        regions = []
-        for m in self.maps:
-            if m.perm.startswith('---'):
-                continue
-            if '/' in file_path:
-                if file_path == m.path:
-                    regions.append(m)
+    def dump(self, start, size, output_path) -> bool:
+        """
+        dump momory to file
+        :param start: address or filename to dump
+        :param size: set size = 0 to read until memory became noncontinuous
+        :param output_path:
+        :return: bool: complete success
+        """
+        if isinstance(start, str):
+            target = None
+            for i in self.maps:
+                if 'x' in i.perm and i.path.endswith(start) and i.offset == 0:
+                    target = i.addr
+            if target:
+                start = target
             else:
-                target = os.path.basename(m.path)
-                if file_path == target:
+                raise Exception('dump file not found')
+
+        regions = []
+
+        if size == 0:
+            current_region = self.get_ptr_info(start)
+            regions.append(current_region)
+            idx = self.maps.index(current_region)
+            for i in range(idx + 1, len(self.maps)):
+                if (self.maps[i - 1].addr + self.maps[i - 1].size) != self.maps[i].addr:
+                    break
+                regions.append(self.maps[i])
+        else:
+            for m in self.maps:
+                if start <= m.addr < (m.addr+m.size) <= (start + size):
                     regions.append(m)
-        sorted_regions = sorted(regions, key=lambda k: k.offset)
-        sorted_mem = []
-        for m in sorted_regions:
-            sorted_mem.append(self.mem.readbuf(m.addr, m.size))
+            # regions must be continuous, or diy.
+            for i in range(0, len(regions) - 1):
+                if (regions[i].addr + regions[i].size) != regions[i+1].addr:
+                    raise Exception("noncontinuous memory")
 
         outdir = os.path.dirname(output_path)
         if outdir:
             os.makedirs(os.path.dirname(outdir), mode=0o755, exist_ok=True)
-        fm = open(output_path, 'wb')
-        fm.write(b'' * (sorted_regions[-1].offset + sorted_regions[-1].size))
-        for i, m in enumerate(sorted_mem):
-            fm.seek(sorted_regions[i].offset)
-            fm.write(m)
+        fm = open(output_path + f'_0x{start:x}', 'wb')
+
+        # backup
+        orig_perms = [self.get_perm(i.addr) for i in regions]
+        # make readable
+        for i, m in regions:
+            self.set_perm(m.ptr, orig_perms[i] + 'r')
+
+        dumped = self.mem.readbuf(start, size)
+
+        # recover protection
+        for i, m in regions:
+            self.set_perm(m.ptr, orig_perms[i])
+
+        fm.write(dumped)
         fm.close()
+        return len(dumped) == size
 
     @cached_property
     def libc(self):
@@ -304,6 +410,23 @@ class Memory:
         self.seek(prev_pos)
         return retval
 
+    def readptr(self, addr: int, size=0) -> int:
+        if size == 0:
+            if self.x64:
+                size = 8
+            else:
+                size = 4
+        if size == 8:
+            buf = self.readbuf(addr, 8)
+            ptr = struct.unpack('<Q', buf)[0]
+            return ptr
+        elif size == 4:
+            buf = self.readbuf(addr, 4)
+            ptr = struct.unpack('<L', buf)[0]
+            return ptr
+        else:
+            raise Exception("unknown size for readptr")
+
     def readcstr(self, cstr_ptr, encoding='utf-8') -> str:
         """
         smartass helper, try to read string of struct { uint32_t length; char cstr[length]; }
@@ -321,7 +444,7 @@ class Memory:
         self.seek(prev_pos)
         return retval.decode(encoding, errors='ignore')
 
-    def search(self, pattern: Union(str, bytes), addr: int, size: int, pattern_type: str = '', limit: int = 1,
+    def search(self, pattern: TUnion[str, bytes], addr: int, size: int, pattern_type: str = '', limit: int = 1,
                verbose: bool = False, onfound: Callable = None) -> list:
         """
         :param limit: 0: inf, >=1: break on limit
@@ -345,7 +468,7 @@ class Memory:
         # merge with last buf in case pattern split by boundary
         last_buf = None
         while remained_size > 0:
-            readsize = self.bufsize if self.bufsize >= remained_size else remained_size
+            readsize = self.bufsize if remained_size >= self.bufsize else remained_size
             buf = self.read(readsize)
             remained_size -= readsize
             merged_buf = buf
@@ -374,7 +497,7 @@ class Memory:
         self.seek(prev_pos)
         return retval
 
-    def _pattern_to_bytes(self, pattern, pattern_type) -> (bytes, tuple):
+    def _pattern_to_bytes(self, pattern, pattern_type):
         pt = pattern_type.lower()
         if isinstance(pattern, (bytes, str)):
             if pt == 'aob' or pt == 'array of bytes':
@@ -426,7 +549,7 @@ class Flags:
     def get(flag: str) -> str:
         fp = f'/proc/sys/{flag}'
         if os.path.exists(fp):
-            return Path(fp).read_text()
+            return pathlib.Path(fp).read_text()
         else:
             return ''
 
@@ -436,7 +559,7 @@ class Flags:
             value = str(value)
         fp = f'/proc/sys/{flag}'
         if os.path.exists(fp):
-            Path(fp).write_text(value)
+            pathlib.Path(fp).write_text(value)
             return True
         else:
             return False

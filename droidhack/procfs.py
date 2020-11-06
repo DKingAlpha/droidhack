@@ -39,7 +39,11 @@ class Processes:
                     if not all:
                         return i
                     retval.append(i)
-            return tuple(retval)
+            if not all:
+                # not found
+                return None
+            else:
+                return tuple(retval)
         elif isinstance(pid_or_cmd, str):
             retval = []
             for i in self.procs:
@@ -47,7 +51,11 @@ class Processes:
                     if not all:
                         return i
                     retval.append(i)
-            return tuple(retval)
+            if not all:
+                # not found
+                return None
+            else:
+                return tuple(retval)
         else:
             raise Exception("unknown pid or cmdline")
 
@@ -71,8 +79,19 @@ class MapInfo(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
+    def __init__(self, proc, index):
+        super().__init__()
+        self.proc = proc
+        self.index = index
+
+    def prev(self, i=1):
+        return self.proc.maps[self.index-i]
+
+    def next(self, i=1):
+        return self.proc.maps[self.index+i]
+
     def __repr__(self):
-        return f"addr: {self.addr:x}, size: {self.size:x}, offset: {self.offset:08x} {self.perm} {self.path}"
+        return f"{self.addr:x}-{self.addr+self.size:x}, size: {self.size:x}, offset: {self.offset:08x} {self.perm} {self.path}"
 
 
 class SMapInfo(dict):
@@ -86,8 +105,10 @@ class SMapInfo(dict):
     usage:
         m.addr or m['addr']
     """
-    def __init__(self):
+    def __init__(self, proc, index):
         super().__init__()
+        self.proc = proc
+        self.index = index
         __setattr__ = self.__setitem__
         __delattr__ = self.__delitem__
 
@@ -97,11 +118,16 @@ class SMapInfo(dict):
 
     def __delitem__(self, key):
         assert isinstance(key, str)
-        return super().__setitem__(key.lower())
+        return super().__delitem__(key.lower())
 
     def __getattr__(self, item):
         return super().get(item.lower())
 
+    def prev(self, i=1):
+        return self.proc.maps[self.index-i]
+
+    def next(self, i=1):
+        return self.proc.maps[self.index+i]
 
     def __repr__(self):
         return f"addr: {self.addr:x}, size: {self.size:x}, offset: {self.offset:08x} {self.perm} {self.path}"
@@ -157,9 +183,9 @@ class Process:
 
     @cached_proc_property
     def smaps(self) -> list:
-        def handle_block(block):
-            sinfo = SMapInfo()
-            mapinfo = self._maps_line_to_mapinfo(block.pop(0))
+        def handle_block(block, index):
+            sinfo = SMapInfo(self, index)
+            mapinfo = self._maps_line_to_mapinfo(block.pop(0), index)
             for k in mapinfo:
                 sinfo[k] = mapinfo[k]
             for i in block:
@@ -175,7 +201,7 @@ class Process:
                     v = int(v_size[0]) * 1024
                 sinfo[k] = v
             return sinfo
-
+        index = 0
         retval = []
         current_block = []
         smaps_content = pathlib.Path(f'/proc/{self.pid}/smaps').read_text()
@@ -186,14 +212,15 @@ class Process:
             m = m.rstrip()
             if start_pattern.fullmatch(m):
                 if current_block:
-                    retval.append(handle_block(current_block))
+                    retval.append(handle_block(current_block, index))
+                    index += 1
                     current_block = []
             current_block.append(m)
         return retval
 
-    def _maps_line_to_mapinfo(self, line):
+    def _maps_line_to_mapinfo(self, line, index):
         minfo = line.rstrip().split(maxsplit=self.maps_config['maxsplit'])
-        mm = MapInfo()
+        mm = MapInfo(self, index)
         for col in self.maps_config['index']:
             col_index = self.maps_config['index'][col]
             if col_index < len(minfo):
@@ -219,8 +246,10 @@ class Process:
         if not maps_content:
             return []
         retval = []
+        index = 0
         for m in maps_content.splitlines():
-            retval.append(self._maps_line_to_mapinfo(m))
+            retval.append(self._maps_line_to_mapinfo(m, index))
+            index += 1
 
         return retval
 
@@ -297,17 +326,7 @@ class Process:
             os.makedirs(os.path.dirname(outdir), mode=0o755, exist_ok=True)
         fm = open(output_path + f'_0x{start:x}', 'wb')
 
-        # backup
-        orig_perms = [self.get_perm(i.addr) for i in regions]
-        # make readable
-        for i, m in regions:
-            self.set_perm(m.ptr, orig_perms[i] + 'r')
-
         dumped = self.mem.readbuf(start, size)
-
-        # recover protection
-        for i, m in regions:
-            self.set_perm(m.ptr, orig_perms[i])
 
         fm.write(dumped)
         fm.close()
@@ -327,53 +346,22 @@ class Process:
                 return m
         return None
 
-    def get_perm(self, ptr: int) -> str:
-        """
-        Get memory protection at ptr.
-        :param ptr: address
-        :return: str of 'rwxp' flags
-        """
-        self.update()
-        info = self.get_ptr_info(ptr)
-        if info:
-            return info.perm
-        else:
-            return ''
-
-    def set_perm(self, ptr: int, perm: str, size: int = 0) -> bool:
-        """
-        Set memory protection at ptr.
-        :param ptr: address
-        :param perm: protection string
-        :param size: If set to non-zero, only relevant pages will be affected.
-            Or by default, Protection of whole memory region will be updated. The latter one is recommended.
-        :return: ok: bool
-        """
-        permbits = 0
-        if 'r' in perm:
-            permbits |= 0x1
-        if 'w' in perm:
-            permbits |= 0x2
-        if 'x' in perm:
-            permbits |= 0x4
-
-        if size == 0:
-            info = self.get_ptr_info(ptr)
-            if info:
-                retval = self.libc.mprotect(c_void_p(info.addr),
-                                            c_void_p(info.size),
-                                            c_void_p(permbits))
-                self.update()
-                return retval == 0
-            else:
-                return False
-        else:
-            aligned_addr = int(ptr / self.pagesize) * self.pagesize
-            aligned_size = (ptr - aligned_addr) + size
-            retval = self.libc.mprotect(c_void_p(aligned_addr), c_void_p(aligned_size), c_void_p(permbits))
-            self.update()
-            return retval == 0
-
+    def find_code_cave(self, size, perm: str = 'r-x', start_from: int = 0):
+        if start_from:
+            start_from = self.get_ptr_info(start_from)
+        aligned_size = (int(size / 4) + 1) * 4      # align to addr
+        for i in self.maps:
+            if start_from:
+                if i != start_from:
+                    continue
+                else:
+                    start_from = False
+            if i.inode != 0 or (not i.perm.startswith(perm)) or i.size <= aligned_size:
+                continue
+            inspect_addr = i.addr + i.size - aligned_size
+            if self.mem.readbuf(inspect_addr, aligned_size) == (b'\x00' * aligned_size):
+                return inspect_addr
+        return 0
 
 class Memory:
     def __init__(self, pid, x64):

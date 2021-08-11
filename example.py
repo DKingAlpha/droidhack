@@ -2,6 +2,16 @@ from capstone import *
 from keystone import *
 from droidhack.procfs import *
 from droidhack.devfs import *
+import time
+
+## Note: The code will not run properly on your phone. They are mainly presented to illustrate the API.
+
+procs = Processes()
+victim = procs.get('com.poor.victim')
+
+#### arm64
+libso = '/data/local/tmp/some_lib_to_inject.so'
+victim.load_library('arm64', libso, 0x4A7E8, 0xBCB60)
 
 # get a random process
 procs = Processes()
@@ -42,9 +52,6 @@ for ptr in possible_targets:
     print(f'found at {ptr:x}, region: {msg.get_ptr_info(ptr)}\ndumping opcodes:')
     for i in dism.disasm(msg.mem.readbuf(ptr, 4 * 4), offset=ptr):
         print(i)
-    print('hacking...')
-    old_perm = msg.get_perm(ptr)
-    msg.set_perm(ptr, 'rwx')
     old_opcodes = msg.mem.readbuf(ptr + 4 * 2, 4)
     msg.mem.writebuf(ptr + 4 * 2, asm.asm('mov x0, x1', as_bytes=True)[0])
     print(f'modified instructions at {ptr:x}, dumping opcodes:')
@@ -52,8 +59,6 @@ for ptr in possible_targets:
         print(i)
     # restore opcodes
     msg.mem.writebuf(ptr + 4 * 2, old_opcodes)
-    print('restore perm')
-    msg.set_perm(ptr, old_perm)
     print(f'current ptr info: {msg.get_ptr_info(ptr)}')
 
 

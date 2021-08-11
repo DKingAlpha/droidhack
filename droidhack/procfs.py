@@ -1,4 +1,5 @@
 import re
+import os
 import struct
 from ctypes import *
 from typing import Union as TUnion, Callable
@@ -134,7 +135,12 @@ class SMapInfo(dict):
 
 
 class Process:
-    def __init__(self, pid):
+    """
+    Process() returns current process
+    """
+    def __init__(self, pid=0):
+        if pid == 0:
+            pid = os.getpid()
         self.pid = pid
         self.maps_config = {
             'maxsplit': 5,
@@ -257,8 +263,8 @@ class Process:
     def mem(self):
         return Memory(self.pid, self.x64)
 
-    def search(self, pattern: str, addr: int = 0, size: int = 0, pattern_type: str = '', limit: int = 1,
-               verbose: bool = False, onfound: Callable = None) -> list:
+    def search(self, pattern:str, addr:int=0, size:int=0, pattern_type:str='', limit:int=1,
+               verbose:bool=False, onfound:Callable=None) -> list:
         """
         See Memory.search
         """
@@ -284,13 +290,12 @@ class Process:
                     break
             return retval
 
-    def dump(self, start, size, output_path) -> bool:
+    def dump(self, start, size, output_path):
         """
         dump momory to file
         :param start: address or filename to dump
         :param size: set size = 0 to read until memory became noncontinuous
         :param output_path:
-        :return: bool: complete success
         """
         if isinstance(start, str):
             target = None
@@ -302,35 +307,30 @@ class Process:
             else:
                 raise Exception('dump file not found')
 
-        regions = []
-
-        if size == 0:
-            current_region = self.get_ptr_info(start)
-            regions.append(current_region)
-            idx = self.maps.index(current_region)
-            for i in range(idx + 1, len(self.maps)):
-                if (self.maps[i - 1].addr + self.maps[i - 1].size) != self.maps[i].addr:
-                    break
-                regions.append(self.maps[i])
-        else:
-            for m in self.maps:
-                if start <= m.addr < (m.addr+m.size) <= (start + size):
-                    regions.append(m)
-            # regions must be continuous, or diy.
-            for i in range(0, len(regions) - 1):
-                if (regions[i].addr + regions[i].size) != regions[i+1].addr:
-                    raise Exception("noncontinuous memory")
-
         outdir = os.path.dirname(output_path)
         if outdir:
             os.makedirs(os.path.dirname(outdir), mode=0o755, exist_ok=True)
         fm = open(output_path + f'_0x{start:x}', 'wb')
 
-        dumped = self.mem.readbuf(start, size)
-
-        fm.write(dumped)
+        if size == 0:
+            current_region = self.get_ptr_info(start)
+            idx = self.maps.index(current_region)
+            has_written_zero = None
+            for i in range(idx, len(self.maps)):
+                if (self.maps[i].addr + self.maps[i].size) != self.maps[i+1].addr:
+                    break
+                m = self.maps[i]
+                dumped = self.mem.readbuf(start, size)
+                if m.offset == 0:
+                    if has_written_zero:
+                        raise Exception(f'duplicate file offset 0: {has_written_zero} <=> {m}')
+                    has_written_zero = m
+                fm.seek(m.offset)
+                fm.write(dumped)
+        else:
+            dumped = self.mem.readbuf(start, size)
+            fm.write(dumped)
         fm.close()
-        return len(dumped) == size
 
     @cached_property
     def libc(self):
@@ -346,7 +346,7 @@ class Process:
                 return m
         return None
 
-    def find_code_cave(self, size, perm: str = 'r-x', start_from: int = 0):
+    def find_code_cave(self, size, perm:str='r-x', start_from:int=0, not_addrs:tuple=()):
         if start_from:
             start_from = self.get_ptr_info(start_from)
         aligned_size = (int(size / 4) + 1) * 4      # align to addr
@@ -360,8 +360,148 @@ class Process:
                 continue
             inspect_addr = i.addr + i.size - aligned_size
             if self.mem.readbuf(inspect_addr, aligned_size) == (b'\x00' * aligned_size):
-                return inspect_addr
+                if inspect_addr not in not_addrs:
+                    return inspect_addr
         return 0
+
+    def get_perm(self, ptr: int) -> str:
+        """
+        Get memory protection at ptr.
+        :param ptr: address
+        :return: str of 'rwxp' flags
+        """
+        self.update()
+        info = self.get_ptr_info(ptr)
+        if info:
+            return info.perm
+        else:
+            return ''
+
+    def set_perm(self, ptr: int, perm: str, size: int = 0) -> bool:
+        """
+        Set memory protection at ptr.
+        :param ptr: address
+        :param perm: protection string
+        :param size: If set to non-zero, only relevant pages will be affected.
+            Or by default, Protection of whole memory region will be updated. The latter one is recommended.
+        :return: ok: bool
+        """
+        if os.getpid() != self.pid:
+            raise Exception("set perm is only available for self process")
+
+        permbits = 0
+        if 'r' in perm:
+            permbits |= 0x1
+        if 'w' in perm:
+            permbits |= 0x2
+        if 'x' in perm:
+            permbits |= 0x4
+
+        if size == 0:
+            info = self.get_ptr_info(ptr)
+            if info:
+                retval = self.libc.mprotect(c_void_p(info.addr),
+                                            c_void_p(info.size),
+                                            c_void_p(permbits))
+                self.update()
+                return retval == 0
+            else:
+                return False
+        else:
+            aligned_addr = int(ptr / self.pagesize) * self.pagesize
+            aligned_size = (ptr - aligned_addr) + size
+            retval = self.libc.mprotect(c_void_p(aligned_addr), c_void_p(aligned_size), c_void_p(permbits))
+            self.update()
+            return retval == 0
+
+    def load_library(self, arch, libso, libc_time_offset, libc_dlopen_offset):
+        """
+        Load library by hooking time() to a stub that calls dlopen to load library
+        :param arch: currently arm64 only
+        :param libso: so filename or path to load.
+        :param libc_time_offset: time function offset to libc
+        :param libc_dlopen_offset: dlopen function offset to libc
+        """
+        try:
+            import keystone
+            asm = keystone.Ks(keystone.KS_ARCH_ARM64, keystone.KS_MODE_LITTLE_ENDIAN)
+
+            has_runned_flag_addr = self.find_code_cave(4, perm='rw')
+            if has_runned_flag_addr == 0:
+                raise Exception('failed to find data cave')
+            # print(f'has_runned_flag_addr: {has_runned_flag_addr:x}, {victim.get_ptr_info(has_runned_flag_addr)}')
+
+            #### get the payload length with random address
+            shellcode_len = 0
+            if arch == 'arm64':
+                shellcode_len = len(asm.asm(self.get_dlopen_payload_arm64(0, 0, 0 , libso),
+                                        addr=0, as_bytes=True)[0])
+            else:
+                raise Exception('load library only support arm64 currently')
+            
+            if shellcode_len == 0:
+                raise Exception('failed to generate payload')
+            #### now find a code cave
+            shellcode_addr = self.find_code_cave(shellcode_len, not_addrs=(has_runned_flag_addr,))
+            if shellcode_addr == 0:
+                raise Exception('failed to find code cave')
+            # print(f'shellcode_addr: {shellcode_addr:x}, {victim.get_ptr_info(shellcode_addr)}')
+
+            #### get the real payload
+            time_addr = self.find('/libc.so')[0].addr + libc_time_offset
+            dlopen_addr = self.mem.readptr(self.find('/libc.so')[0].addr + libc_dlopen_offset)
+            shellcode = asm.asm(self.get_dlopen_payload_arm64(time_addr, has_runned_flag_addr, dlopen_addr, libso),
+                                addr=shellcode_addr, as_bytes=True)[0]
+
+            trampoline = asm.asm(f"""
+            b #{shellcode_addr}
+            """, addr=time_addr, as_bytes=True)[0]
+            # prepare stub
+            self.mem.writebuf(shellcode_addr, shellcode)
+            # detour
+            self.mem.writebuf(time_addr, trampoline)
+            return True
+        except ImportError:
+            print('python dependency keystone is required')
+            return False
+
+    def get_dlopen_payload_arm64(self, hook_addr, flag_addr, dlopen_addr, library):
+        orig_ins_as_u32 = self.mem.readptr(hook_addr, 4)
+        return f"""
+            sub sp, sp, #0x40
+            stp x29, x30, [sp]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+            adr x1, flag_ptr
+            ldr x0, [x1]
+            ldr x1, [x0]
+            cmp x1, 0
+            bne return_to_caller
+            // mark runned
+            mov x1, 1
+            str x1, [x0]
+            // run
+            adr x0, library_to_load
+            mov x1, #0x101
+            bl #{dlopen_addr}
+            cmp x0, 0
+            bne return_to_caller
+            // x0 == 0, something wrong, crash now
+        return_to_caller:
+            ldp x29, x30, [sp]
+            ldp x0, x1, [sp, #0x10]
+            ldp x2, x3, [sp, #0x20]
+            add sp, sp, #0x40
+        orig_ins:
+            .4byte {orig_ins_as_u32}
+            b #{hook_addr+4}
+    
+        flag_ptr:
+            .8byte {flag_addr}
+    
+        library_to_load:
+            .string "{library}"
+        """
 
 class Memory:
     def __init__(self, pid, x64):

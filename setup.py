@@ -6,7 +6,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="droidhack",
-    version="1.1",
+    version="1.3",
     author="DKing",
     author_email="dking@tot.im",
     description="A toolkit that provides easy access with procfs and devfs",

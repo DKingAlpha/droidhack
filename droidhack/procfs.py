@@ -466,7 +466,7 @@ class Process:
             return False
 
     def get_dlopen_payload_arm64(self, hook_addr, flag_addr, dlopen_addr, library):
-        orig_ins_as_u32 = self.mem.readptr(hook_addr, 4)
+        orig_ins_as_u32 = self.mem.readptr(hook_addr, 4) if hook_addr else 0
         return f"""
             sub sp, sp, #0x40
             stp x29, x30, [sp]
